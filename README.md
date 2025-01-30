@@ -21,4 +21,8 @@ py-kms is a port of node-kms by [markedsword](http://forums.mydigitallife.info/m
 - Micropython v1.9 is necessary since large int support starts here.
 - You need libffi.
 - You need some standard library of module. Use `micropython -m upip install -r requirements-micropython.txt` to install.
-- Only unix port is supported. Other platforms don't have some stdlib and performance may be a problem. 
+- Only unix port is supported. Other platforms don't have some stdlib and performance may be a problem.
+
+# Disclaimer
+This program is meant for education use only and not meant to be used in production environment. We do not condone hosting this software for public use and we only suggest this for educational environments. We are not liable for any claims from Microsoft Corp.
+<br> DO NOT PUBLICLY HOST THIS.
