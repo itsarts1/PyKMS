@@ -1,0 +1,17 @@
+# systemd unit file, copy to /etc/systemd/system/pykms.service
+# adjust WorkingDirectory
+# "systemctl start pykms" to start
+# "systemctl enable pykms" to auto-start
+
+[Unit]
+Description=py-kms Key Management Server for Microsoft products
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/py-kms/
+ExecStart=/usr/bin/python server.py
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target

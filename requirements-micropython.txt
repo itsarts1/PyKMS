@@ -1,0 +1,13 @@
+micropython-argparse
+micropython-errno
+micropython-future
+micropython-hmac
+micropython-stat
+micropython-warnings
+micropython-binascii
+micropython-ffilib
+micropython-hashlib
+micropython-os
+micropython-os.path
+micropython-socket
+micropython-time
