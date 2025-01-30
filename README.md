@@ -1,10 +1,10 @@
 # History
+This Version allows for activation of Windows Server 2022-2025
 py-kms is a port of node-kms by [markedsword](http://forums.mydigitallife.info/members/183074-markedsword), which is a port of either the C#, C++, or .NET implementations of KMSEmulator, of which the original version was written by [CODYQX4](http://forums.mydigitallife.info/members/89933-CODYQX4) and is derived from the reverse-engineered code of Microsoft's official KMS.
 
 # Features
 - Responds to V4, V5, and V6 KMS requests.
 - Supports activating all versions after Windows Vista / 2008 and Office 2010.
-- If you do want to activate a new version with correct csvlk (not necessary unless you want to pretend an official server), generate a new KmsDataBase.xml using License Manager by Hotbird64 and replace the one in this repo.
 - It's written in Python.
 
 # Dependencies
