@@ -51,6 +51,12 @@
 			<Activate KmsItem="11b15659-e603-4cf1-9c1f-f0ec01b81888" />
 		</CsvlkItem>
 
+		<CsvlkItem DisplayName="Windows 10 Enterprise (ESU)" GroupId="206" MinKeyId="256000000" MaxKeyId="265999999" IniFileName="Windows" Id="f5f4c12e-f385-4f56-9845-94f6b05b0415">
+  			<Activate KmsItem="9ae0ea9e-afc5-4ab2-b4a3-f3a60c3e1bd6" /> <!-- ESU Y1 -->
+  			<Activate KmsItem="87c5dbde-1c10-42c9-923d-47f100f5f5db" /> <!-- ESU Y2 -->
+  			<Activate KmsItem="c04ed6cf-96d8-4dfc-ae60-35605f5667c4" /> <!-- ESU Y3 -->
+		</CsvlkItem>
+
 		<CsvlkItem DisplayName="Windows Server 2022" VlmcsdIndex="8" GroupId="207" MinKeyId="571000000" MaxKeyId="590999999" IniFileName="Windows" EPid="03612-00207-570-514277-03-1033-26100.0000-2912018" Id="3e7b1a1a-9c23-45f0-bd62-e06313d2d36d">
     		<Activate KmsItem="f12a2fa3-7c38-4f0a-9980-3680bc77f646" />
 			<Activate KmsItem="58e2134f-8e11-4d17-9cb2-91069c151148" />
@@ -774,3 +780,5 @@
 	</AppItems>
 
 </KmsData>
+
+
