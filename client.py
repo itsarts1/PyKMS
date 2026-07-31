@@ -1,5 +1,6 @@
 import argparse
 import binascii
+import os.path
 import time
 import random
 import socket
@@ -18,14 +19,99 @@ from kmsBase import kmsRequestStruct, UUID
 from kmsRequestV4 import kmsRequestV4, generateHash
 from kmsRequestV5 import kmsRequestV5
 from kmsRequestV6 import kmsRequestV6
+from xmltok import tokenize
+from uxml2dict import parse
 
 config = {}
+
+kmsdb = os.path.join(os.path.dirname(__file__), 'KmsDataBase.xml')
+
+# Application IDs whose products only need 5 clients to activate (Office).
+OFFICE_APP_IDS = frozenset([
+	"59a52881-a989-479d-af46-f275c6370663",  # Office 2010
+	"0ff1ce15-a989-479d-af46-f275c6370663",  # Office 2013+
+])
+
+# Legacy short mode names kept for backwards compatibility. Each maps to a
+# product's KmsItem @DisplayName in KmsDataBase.xml.
+ALIASES = {
+	'WindowsVista': "Windows Vista",
+	'Windows7':     "Windows 7",
+	'Windows8':     "Windows 8 (Volume)",
+	'Windows81':    "Windows 8.1 (Volume)",
+	'Windows10':    "Windows 10 2015 (Volume)",
+	'Office2010':   "Office 2010",
+	'Office2013':   "Office 2013",
+	'Office2016':   "Office 2016",
+}
+
+def loadCatalog():
+	"""Parse KmsDataBase.xml into a flat list of activatable products, one per
+	KmsItem. Each product carries everything a KMS request needs: the parent
+	application id, the KmsItem id (KMS counted id), the protocol major version
+	and the list of (skuId, skuName) pairs. KmsItems without any SKU are skipped
+	because there is nothing to request."""
+	with open(kmsdb) as f:
+		db = parse(tokenize(f), lesslist=False)['KmsData'][0]
+
+	catalog = []
+	for app in db['AppItems'][0]['AppItem']:
+		appId, appName = app['@Id'], app['@DisplayName']
+		kmsItems = app['KmsItem']
+		if not isinstance(kmsItems, list):
+			kmsItems = [kmsItems]
+		for kms in kmsItems:
+			skuItems = kms.get('SkuItem', [])
+			if not isinstance(skuItems, list):
+				skuItems = [skuItems]
+			skus = [(s['@Id'], s['@DisplayName']) for s in skuItems if s]
+			if not skus:
+				continue
+			proto = kms.get('@DefaultKmsProtocol')
+			if not proto:
+				continue
+			catalog.append({
+				'appId':   appId,
+				'appName': appName,
+				'kmsId':   kms['@Id'],
+				'kmsName': kms['@DisplayName'],
+				'major':   int(float(proto)),  # "6.0" -> 6
+				'skus':    skus,
+			})
+	return catalog
+
+def findProduct(catalog, mode):
+	"""Resolve a -m/--mode value to a product. Accepts a legacy alias, a KmsItem
+	display name (case-insensitive) or a raw KmsItem GUID."""
+	mode = ALIASES.get(mode, mode)
+	lowered = mode.lower()
+	for product in catalog:
+		if product['kmsName'].lower() == lowered:
+			return product
+	for product in catalog:
+		if product['kmsId'].lower() == lowered:
+			return product
+	return None
+
+def printCatalog(catalog):
+	aliasByName = dict((v, k) for k, v in ALIASES.items())
+	lastApp = None
+	for product in catalog:
+		if product['appName'] != lastApp:
+			print("\n%s:" % product['appName'])
+			lastApp = product['appName']
+		alias = aliasByName.get(product['kmsName'])
+		print("  V%d  %-45s  %2d SKU(s)%s" % (
+			product['major'], product['kmsName'], len(product['skus']),
+			"  [alias: %s]" % alias if alias else ""))
 
 def main():
 	parser = argparse.ArgumentParser()
 	parser.add_argument("ip", action="store", help="The IP address or hostname of the KMS host.", type=str)
 	parser.add_argument("port", nargs="?", action="store", default=1688, help="The port the KMS service is listening on. The default is \"1688\".", type=int)
-	parser.add_argument("-m", "--mode", dest="mode", choices=["WindowsVista","Windows7","Windows8","Windows81","Windows10","Office2010","Office2013","Office2016"], default="Windows7")
+	parser.add_argument("-m", "--mode", dest="mode", default="Windows7", type=str, help="The product to request activation for. Accepts a legacy alias (Windows7, Windows10, Office2016, ...) or any product name from KmsDataBase.xml (e.g. \"Windows Server 2025\"). Use --list to see all products. Default is \"Windows7\".")
+	parser.add_argument("--list", dest="list", action="store_const", const=True, default=False, help="List every product available in KmsDataBase.xml and exit.")
+	parser.add_argument("--sku", dest="sku", default=None, type=str, help="Optionally pick a specific SKU (by name or GUID) within the chosen product. Default is the product's first SKU.")
 	parser.add_argument("-c", "--cmid", dest="cmid", default=None, help="Use this flag to manually specify a CMID to use. If no CMID is specified, a random CMID will be generated.", type=str)
 	parser.add_argument("-n", "--name", dest="machineName", default=None, help="Use this flag to manually specify an ASCII machineName to use. If no machineName is specified, a random machineName will be generated.", type=str)
 	parser.add_argument("-v", "--verbose", dest="verbose", action="store_const", const=True, default=False, help="Use this flag to enable verbose output.")
@@ -37,6 +123,17 @@ def main():
 		config['verbose'] = True
 	updateConfig()
 	print("Connecting to %s on port %d..." % (config['ip'], config['port']))
+	try:
+		kmsData = exchange()
+	except RuntimeError as e:
+		print("Error: %s Exiting..." % e)
+		sys.exit(1)
+	printResult(kmsData)
+
+def exchange():
+	"""Run the RPC bind followed by the activation request against the
+	configured server and return the parsed KMS response data. Raises
+	RuntimeError on any protocol-level failure."""
 	s = socket.create_connection((config['ip'], config['port']))
 	if config['verbose']:
 		print("Connection successful!")
@@ -49,41 +146,40 @@ def main():
 		bindResponse = s.recv(1024)
 	except socket.error as e:
 		if e.errno == errno.ECONNRESET:
-			print("Error: Connection reset by peer. Exiting...")
-			sys.exit()
-		else:
-			raise
-	if bindResponse == '' or not bindResponse:
-		print("No data received! Exiting...")
-		sys.exit()
+			raise RuntimeError("Connection reset by peer during bind.")
+		raise
+	if not bindResponse:
+		raise RuntimeError("No data received during bind.")
 	packetType = MSRPCHeader(bindResponse)['type']
-	if packetType == MSRPC_BINDACK:
-		if config['verbose']:
-			print("RPC bind acknowledged.")
-		kmsRequest = createKmsRequest()
-		requester = rpcRequest.handler(kmsRequest, config)
-		s.send(bytes(requester.generateRequest()))
-		response = s.recv(1024)
-		if config['debug']:
-			print("Response:", binascii.b2a_hex(response))
-		parsed = MSRPCRespHeader(response)
-		kmsData = readKmsResponse(parsed['pduData'], kmsRequest, config)
-		kmsResp = kmsData['response']
-		try:
-			hwid = kmsData['hwid']
-			print("KMS Host HWID:", binascii.b2a_hex(hwid).upper())
-		except KeyError:
-			pass
-		print("KMS Host ePID:", kmsResp['kmsEpid'])
-		print("KMS Host Current Client Count:", kmsResp['currentClientCount'])
-		print("KMS VL Activation Interval:", kmsResp['vLActivationInterval'])
-		print("KMS VL Renewal Interval:", kmsResp['vLRenewalInterval'])
-	elif packetType == MSRPC_BINDNAK:
-		print(MSRPCBindNak(bindResponse).dump())
-		sys.exit()
-	else:
-		print("Something went wrong.")
-		sys.exit()
+	if packetType == MSRPC_BINDNAK:
+		MSRPCBindNak(bindResponse).dump()
+		raise RuntimeError("RPC bind was rejected by the server (BINDNAK).")
+	if packetType != MSRPC_BINDACK:
+		raise RuntimeError("Unexpected RPC packet type during bind: %s." % packetType)
+	if config['verbose']:
+		print("RPC bind acknowledged.")
+	kmsRequest = createKmsRequest()
+	requester = rpcRequest.handler(kmsRequest, config)
+	s.send(bytes(requester.generateRequest()))
+	response = s.recv(1024)
+	if config['debug']:
+		print("Response:", binascii.b2a_hex(response))
+	if not response:
+		raise RuntimeError("No data received for the activation request.")
+	parsed = MSRPCRespHeader(response)
+	return readKmsResponse(parsed['pduData'], kmsRequest, config)
+
+def printResult(kmsData):
+	kmsResp = kmsData['response']
+	try:
+		hwid = kmsData['hwid']
+		print("KMS Host HWID:", binascii.b2a_hex(hwid).upper().decode('ascii'))
+	except KeyError:
+		pass
+	print("KMS Host ePID:", kmsResp['kmsEpid'].decode('utf-16le'))
+	print("KMS Host Current Client Count:", kmsResp['currentClientCount'])
+	print("KMS VL Activation Interval:", kmsResp['vLActivationInterval'])
+	print("KMS VL Renewal Interval:", kmsResp['vLRenewalInterval'])
 
 def checkConfig():
 	if config['cmid'] is not None:
@@ -98,70 +194,37 @@ def checkConfig():
 			sys.exit()
 
 def updateConfig():
-	if config['mode'] == 'WindowsVista':
-		config['RequiredClientCount'] = 25
-		config['KMSProtocolMajorVersion'] = 4
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "55c92734-d682-4d71-983e-d6ec3f16059f"
-		config['KMSClientSkuID'] = "cfd8ff08-c0d7-452b-9f60-ef5c70c32094"
-		config['KMSClientKMSCountedID'] = "212a64dc-43b1-4d3d-a30c-2fc69d2095c6"
-	elif config['mode'] == 'Windows7':
-		config['RequiredClientCount'] = 25
-		config['KMSProtocolMajorVersion'] = 4
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "55c92734-d682-4d71-983e-d6ec3f16059f"
-		config['KMSClientSkuID'] = "ae2ee509-1b34-41c0-acb7-6d4650168915"
-		config['KMSClientKMSCountedID'] = "7fde5219-fbfa-484a-82c9-34d1ad53e856"
-	elif config['mode'] == 'Windows8':
-		config['RequiredClientCount'] = 25
-		config['KMSProtocolMajorVersion'] = 5
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "55c92734-d682-4d71-983e-d6ec3f16059f"
-		config['KMSClientSkuID'] = "458e1bec-837a-45f6-b9d5-925ed5d299de"
-		config['KMSClientKMSCountedID'] = "3c40b358-5948-45af-923b-53d21fcc7e79"
-	elif config['mode'] == 'Windows81':
-		config['RequiredClientCount'] = 25
-		config['KMSProtocolMajorVersion'] = 6
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "55c92734-d682-4d71-983e-d6ec3f16059f"
-		config['KMSClientSkuID'] = "81671aaf-79d1-4eb1-b004-8cbbe173afea"
-		config['KMSClientKMSCountedID'] = "cb8fc780-2c05-495a-9710-85afffc904d7"
-	elif config['mode'] == 'Windows10':
-		config['RequiredClientCount'] = 25
-		config['KMSProtocolMajorVersion'] = 6
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "55c92734-d682-4d71-983e-d6ec3f16059f"
-		config['KMSClientSkuID'] = "73111121-5638-40f6-bc11-f1d7b0d64300"
-		config['KMSClientKMSCountedID'] = "58e2134f-8e11-4d17-9cb2-91069c151148"
-	elif config['mode'] == 'Office2010':
-		config['RequiredClientCount'] = 5
-		config['KMSProtocolMajorVersion'] = 4
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "59a52881-a989-479d-af46-f275c6370663"
-		config['KMSClientSkuID'] = "6f327760-8c5c-417c-9b61-836a98287e0c"
-		config['KMSClientKMSCountedID'] = "e85af946-2e25-47b7-83e1-bebcebeac611"
-	elif config['mode'] == 'Office2013':
-		config['RequiredClientCount'] = 5
-		config['KMSProtocolMajorVersion'] = 5
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "0ff1ce15-a989-479d-af46-f275c6370663"
-		config['KMSClientSkuID'] = "b322da9c-a2e2-4058-9e4e-f59a6970bd69"
-		config['KMSClientKMSCountedID'] = "e6a6f1bf-9d40-40c3-aa9f-c77ba21578c0"
-	elif config['mode'] == 'Office2016':
-		config['RequiredClientCount'] = 5
-		config['KMSProtocolMajorVersion'] = 6
-		config['KMSProtocolMinorVersion'] = 0
-		config['KMSClientLicenseStatus'] = 2
-		config['KMSClientAppID'] = "0ff1ce15-a989-479d-af46-f275c6370663"
-		config['KMSClientSkuID'] = "d450596f-894d-49e0-966a-fd39ed4c4c64"
-		config['KMSClientKMSCountedID'] = "85b5f61b-320b-4be3-814a-b76b2bfafc82"
+	catalog = loadCatalog()
+
+	if config.get('list'):
+		printCatalog(catalog)
+		sys.exit()
+
+	product = findProduct(catalog, config['mode'])
+	if product is None:
+		print("Error: unknown mode/product \"%s\". Use --list to see the available products." % config['mode'])
+		sys.exit(1)
+
+	skuId = product['skus'][0][0]
+	if config.get('sku'):
+		wanted = config['sku'].lower()
+		skuId = next((sid for sid, sname in product['skus'] if wanted == sid.lower() or wanted in sname.lower()), None)
+		if skuId is None:
+			print("Error: SKU \"%s\" not found for product \"%s\". Available SKUs:" % (config['sku'], product['kmsName']))
+			for sid, sname in product['skus']:
+				print("  %s  %s" % (sid, sname))
+			sys.exit(1)
+
+	config['RequiredClientCount'] = 5 if product['appId'].lower() in OFFICE_APP_IDS else 25
+	config['KMSProtocolMajorVersion'] = product['major']
+	config['KMSProtocolMinorVersion'] = 0
+	config['KMSClientLicenseStatus'] = 2
+	config['KMSClientAppID'] = product['appId']
+	config['KMSClientSkuID'] = skuId
+	config['KMSClientKMSCountedID'] = product['kmsId']
+
+	if config['verbose']:
+		print("Requesting activation for: %s (V%d)" % (product['kmsName'], product['major']))
 
 def createKmsRequestBase():
 	requestDict = kmsRequestStruct()
